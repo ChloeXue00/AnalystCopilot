@@ -157,7 +157,7 @@ def run_real() -> None:
     from utils.embedder import load_embedding_model, query_similar_chunks, get_all_documents
 
     COLLECTION = "rag_docs"
-    EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
+    EMBEDDING_MODEL = "voyage-3"
 
     # ⚠️ 改成你知识库里真实文档相关的问题和关键词！下面是占位示例。
     eval_set = [

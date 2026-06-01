@@ -36,12 +36,10 @@ TOP_K: int = 5                 # 【最终】给 LLM 的段落数（第二阶段
 RETRIEVE_K: int = 20           # 【粗筛】向量检索的候选数（第一阶段撒大网，保 recall）
 MAX_DISTANCE: float = 0.8      # 相关度阈值：余弦距离>此值的块视为不相关被丢弃（≈相关度<20%），
                                # 防止"库里没相关内容时硬塞垃圾→幻觉"。用 eval_retrieval.py 调优此值
-ENABLE_RERANK: bool = False    # 第二阶段 cross-encoder 精排开关。
-                               # ⚠️ 默认关闭！开启前必须先把 RERANK_MODEL 下载到本地，
-                               # 否则启动时会卡在联网下载 → 页面一直 Connecting 打不开。
-                               # 下载好后改成 True 即可。
-RERANK_MODEL: str = "BAAI/bge-reranker-base"  # 中文 cross-encoder 重排模型
-EMBEDDING_MODEL: str = "paraphrase-multilingual-MiniLM-L12-v2"  # 多语言嵌入模型
+ENABLE_RERANK: bool = False    # 第二阶段精排开关（Voyage rerank API）。
+                               # 开启会对每次查询多调一次 rerank API，按需开启。
+RERANK_MODEL: str = "rerank-2"                  # Voyage 重排模型
+EMBEDDING_MODEL: str = "voyage-3"               # Voyage 嵌入模型（金融可换 voyage-finance-2）
 CLAUDE_MODEL: str = "claude-sonnet-4-20250514"                   # Claude 模型 ID
 MAX_TOKENS: int = 2048         # Claude 生成回答的最大 token 数
 CHROMA_COLLECTION: str = "rag_docs"  # ChromaDB 集合名称
@@ -62,7 +60,7 @@ st.set_page_config(
 # 全局资源缓存（避免每次刷新重新加载模型）
 # ============================================================
 
-@st.cache_resource(show_spinner="正在加载嵌入模型，首次加载约需 1-2 分钟...")
+@st.cache_resource(show_spinner="正在初始化 embedding 客户端...")
 def get_embedding_model():
     """
     缓存加载 SentenceTransformer 模型。
@@ -133,10 +131,19 @@ def render_sidebar(model):
             "Anthropic API Key",
             value=os.environ.get("ANTHROPIC_API_KEY", ""),
             type="password",
-            help="从 https://console.anthropic.com/ 获取",
+            help="从 https://console.anthropic.com/ 获取（用于生成回答）",
         )
         if api_key_input:
             os.environ["ANTHROPIC_API_KEY"] = api_key_input
+
+        voyage_key_input = st.text_input(
+            "Voyage API Key",
+            value=os.environ.get("VOYAGE_API_KEY", ""),
+            type="password",
+            help="从 https://www.voyageai.com/ 获取（用于文本向量化/检索）",
+        )
+        if voyage_key_input:
+            os.environ["VOYAGE_API_KEY"] = voyage_key_input
         st.markdown("---")
 
         # ── 1. 文件上传区域 ──────────────────────────────
@@ -198,7 +205,7 @@ def render_sidebar(model):
                 f"重叠大小: {OVERLAP} 字符\n"
                 f"粗筛候选: Top-{RETRIEVE_K} → 精排保留: Top-{TOP_K}\n"
                 f"相关度阈值: 距离≤{MAX_DISTANCE}\n"
-                f"知识库路径: ./chroma_db",
+                f"知识库路径: ./vector_store",
                 language="yaml",
             )
 
@@ -402,14 +409,15 @@ def main():
     """
     init_session_state()
 
-    # 加载嵌入模型 + 重排模型（缓存，只在第一次运行时耗时）
+    # 初始化 embedding / rerank 客户端（轻量对象，真正的 API 调用在用到时才发生，
+    # 此时侧边栏已把 API Key 写入环境变量）
     model = get_embedding_model()
-    reranker = get_reranker()  # 可能为 None（未启用/未下载）→ 自动退回纯向量检索
+    reranker = get_reranker()  # 未启用时为 None → 自动退回纯向量检索
 
-    # 渲染侧边栏（文件管理）
+    # 先渲染侧边栏：让用户填入 API Key（在任何 API 调用之前）
     render_sidebar(model)
 
-    # 渲染主对话区域
+    # 再渲染主对话区域
     render_chat_area(model, reranker)
 
 

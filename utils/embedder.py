@@ -1,13 +1,18 @@
 """
 embedder.py
 负责：
-1. 用 sentence-transformers 将文本块向量化
+1. 用 Voyage AI 的 embedding API 将文本块向量化（云端调用，零本地模型依赖）
 2. 一个轻量的【纯 Python / numpy 向量库】（替代 ChromaDB）
 
+为什么用 API embedding 而不是本地 sentence-transformers？
+  本地模型(torch + transformers)在内存受限的部署环境(如 Streamlit Cloud 免费版
+  1GB)会 OOM 崩溃。改用 Voyage embedding API 后，本地无需 torch，内存占用极小，
+  且 Voyage 是 Anthropic 官方推荐、与 Claude 生态契合的 embedding 提供商。
+
 为什么不用 ChromaDB？
-  本机上 chromadb 的原生(Rust/onnxruntime)模块在做向量运算时会崩溃(segfault)，
-  各版本都试过无法解决。RAG 的检索本质就是「算余弦相似度 + 排序」，
-  用 numpy 几十行就能实现，零原生依赖、永不崩溃，而且一切透明可见。
+  chromadb 的原生(Rust/onnxruntime)模块在部分机器上会崩溃(segfault)。
+  RAG 检索本质就是「算余弦相似度 + 排序」，用 numpy 几十行即可实现，
+  零原生依赖、永不崩溃，而且一切透明可见。
 
 存储格式：每个 collection 一个 pickle 文件，放在 ./vector_store/ 下。
   内容是一个 dict：
@@ -23,51 +28,85 @@ import hashlib
 from typing import List, Dict
 
 import numpy as np
-from sentence_transformers import SentenceTransformer, CrossEncoder
+import voyageai
 
 
 # 向量库持久化目录
 STORE_DIR = "./vector_store"
 
-
-# ─────────────────────────────────────────────────────────────────
-# 模型加载（与原来一致，sentence-transformers 在本机正常工作）
-# ─────────────────────────────────────────────────────────────────
-def load_embedding_model(model_name: str) -> SentenceTransformer:
-    """
-    加载 sentence-transformers 多语言嵌入模型。
-    paraphrase-multilingual-MiniLM-L12-v2 支持中文、英文等 50+ 种语言。
-    """
-    return SentenceTransformer(model_name)
+# Voyage embedding 模型（voyage-3 通用；voyage-finance-2 为金融领域专用，可按需替换）
+VOYAGE_MODEL = "voyage-3"
 
 
-def load_reranker(model_name: str) -> CrossEncoder:
+class VoyageEmbedder:
     """
-    加载 cross-encoder 重排模型（第二阶段精排用）。
-    与嵌入模型(双塔)不同：它把(问题,文档)拼在一起打分，准但慢，只对粗筛候选跑。
-    中文场景推荐 "BAAI/bge-reranker-base"。
+    封装 Voyage embedding API，对外暴露与原 sentence-transformers 兼容的 encode()。
+    这样 add_chunks_to_db / query_similar_chunks 几乎无需改动。
+
+    Voyage 对「文档」和「查询」可用不同 input_type 以提升检索效果：
+      - 入库文档 → input_type="document"
+      - 用户查询 → input_type="query"
     """
-    return CrossEncoder(model_name)
+
+    def __init__(self, model_name: str = VOYAGE_MODEL):
+        self.model_name = model_name
+        self._client = None  # 延迟创建：等真正用到时再读 key、建客户端
+
+    @property
+    def client(self):
+        # 延迟初始化，确保此时 VOYAGE_API_KEY 已被侧边栏写入环境变量
+        if self._client is None:
+            self._client = voyageai.Client()  # 自动读取 env VOYAGE_API_KEY
+        return self._client
+
+    def encode(self, texts: List[str], input_type: str = "document") -> np.ndarray:
+        """把一批文本编码成向量矩阵 (N, D)。Voyage 单次最多 128 条，自动分批。"""
+        if isinstance(texts, str):
+            texts = [texts]
+        all_vecs: List[List[float]] = []
+        for i in range(0, len(texts), 128):
+            batch = texts[i:i + 128]
+            resp = self.client.embed(batch, model=self.model_name, input_type=input_type)
+            all_vecs.extend(resp.embeddings)
+        return np.asarray(all_vecs, dtype=np.float32)
+
+
+def load_embedding_model(model_name: str = VOYAGE_MODEL) -> VoyageEmbedder:
+    """
+    返回 Voyage embedding 封装对象。
+    （保留 model_name 参数和函数名，使 app.py 调用方式不变。）
+    """
+    return VoyageEmbedder(model_name)
+
+
+def load_reranker(model_name: str):
+    """
+    Voyage 也提供 rerank API。这里用 voyageai 客户端做重排，无需本地 cross-encoder。
+    返回 voyageai.Client，rerank_chunks 直接用它。
+    """
+    return voyageai.Client()
 
 
 def rerank_chunks(
     query: str,
     chunks: List[Dict],
-    reranker: CrossEncoder,
+    reranker,
     top_n: int = 5,
 ) -> List[Dict]:
     """
-    用 cross-encoder 对粗筛候选重排，返回分数最高的 top_n 个（每块加 rerank_score）。
+    用 Voyage rerank API 对粗筛候选重排，返回分数最高的 top_n 个（每块加 rerank_score）。
     两阶段检索的第二阶段：向量粗筛(保 recall) → 这里精排(保 precision)。
     """
     if not chunks:
         return []
-    pairs = [(query, c["text"]) for c in chunks]
-    scores = reranker.predict(pairs)
-    for chunk, score in zip(chunks, scores):
-        chunk["rerank_score"] = float(score)
-    ranked = sorted(chunks, key=lambda c: c["rerank_score"], reverse=True)
-    return ranked[:top_n]
+    docs = [c["text"] for c in chunks]
+    result = reranker.rerank(query, docs, model="rerank-2", top_k=top_n)
+    ranked: List[Dict] = []
+    for r in result.results:
+        chunk = dict(chunks[r.index])
+        chunk["rerank_score"] = float(r.relevance_score)
+        ranked.append(chunk)
+    return ranked
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -108,7 +147,7 @@ def _make_doc_id(source: str, chunk_id: int) -> str:
 # ─────────────────────────────────────────────────────────────────
 def add_chunks_to_db(
     chunks: List[Dict],
-    model: SentenceTransformer,
+    model: "VoyageEmbedder",
     collection_name: str = "rag_docs",
 ) -> int:
     """
@@ -125,7 +164,7 @@ def add_chunks_to_db(
     texts = [c["text"] for c in chunks]
     new_ids = [_make_doc_id(c["source"], c["chunk_id"]) for c in chunks]
     new_metas = [{"source": c["source"], "chunk_id": c["chunk_id"]} for c in chunks]
-    new_embs = np.asarray(model.encode(texts, show_progress_bar=False), dtype=np.float32)
+    new_embs = model.encode(texts, input_type="document")
 
     store = _load_store(collection_name)
 
@@ -156,7 +195,7 @@ def add_chunks_to_db(
 # ─────────────────────────────────────────────────────────────────
 def query_similar_chunks(
     query: str,
-    model: SentenceTransformer,
+    model: "VoyageEmbedder",
     top_k: int = 5,
     collection_name: str = "rag_docs",
     source_filter: List[str] = None,
@@ -187,7 +226,7 @@ def query_similar_chunks(
             return []
 
     sub_emb = emb[idxs]
-    qv = np.asarray(model.encode([query], show_progress_bar=False)[0], dtype=np.float32)
+    qv = model.encode([query], input_type="query")[0]
 
     # 余弦相似度 = 点积 / (各自模长)
     sims = sub_emb @ qv / (np.linalg.norm(sub_emb, axis=1) * np.linalg.norm(qv) + 1e-10)
