@@ -228,6 +228,14 @@ def query_similar_chunks(
     sub_emb = emb[idxs]
     qv = model.encode([query], input_type="query")[0]
 
+    # 维度一致性检查：库里向量维度必须和当前模型一致。
+    # 不一致 = 库是用别的 embedding 模型建的（如换过模型），必须重建知识库。
+    if sub_emb.shape[1] != qv.shape[0]:
+        raise ValueError(
+            f"向量维度不匹配：知识库是 {sub_emb.shape[1]} 维，当前模型输出 {qv.shape[0]} 维。"
+            f"这通常是更换了 embedding 模型导致的——请删除 ./vector_store 后重新上传 PDF 重建知识库。"
+        )
+
     # 余弦相似度 = 点积 / (各自模长)
     sims = sub_emb @ qv / (np.linalg.norm(sub_emb, axis=1) * np.linalg.norm(qv) + 1e-10)
     distances = 1.0 - sims
