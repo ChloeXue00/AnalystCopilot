@@ -1,0 +1,11 @@
+# Streamlit 配置
+# Windows 上用轮询监视文件，避免 torch 相关的文件监视报错。
+# 注意：不要关闭 CORS/XSRF 校验 —— 实测关闭后本地反而连不上 websocket（页面一直加载）。
+
+[server]
+port = 8501
+headless = false             # 启动时自动弹出浏览器
+fileWatcherType = "poll"     # Windows 上文件监视用轮询，更稳
+
+[browser]
+gatherUsageStats = false     # 关闭遥测
