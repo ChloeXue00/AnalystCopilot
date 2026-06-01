@@ -1,7 +1,10 @@
+# CPU-only torch —— Streamlit Cloud 只有 CPU，装 GPU 版 torch 会撑爆内存/磁盘
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.0.0
+
 streamlit>=1.35.0
 pdfplumber>=0.11.0
 sentence-transformers>=3.0.0
 anthropic>=0.30.0
-torch>=2.0.0
 transformers>=4.40.0
 numpy>=1.24.0
