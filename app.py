@@ -27,7 +27,7 @@ from utils.embedder import (
     get_chunk_count_per_source,
 )
 from utils.chat import chat_with_claude, format_sources_for_display, rewrite_query
-from utils.rate_limit import check_and_increment, get_count
+from utils.rate_limit import check_and_increment
 
 # ============================================================
 # 全局配置常量（在此修改以调整系统行为）
@@ -181,48 +181,6 @@ def render_sidebar(model):
     """
     with st.sidebar:
         st.title("📊 行研知识库助手")
-        st.markdown("---")
-
-        # ── 0. API Key 配置 ──────────────────────────────
-        st.subheader("🔑 API 配置")
-
-        # 是否已由作者的 secrets 提供了可用的演示额度
-        demo_ready = bool(os.environ.get("ANTHROPIC_API_KEY")) and bool(
-            os.environ.get("VOYAGE_API_KEY")
-        )
-
-        if demo_ready and not st.session_state.get("byo_key"):
-            used = get_count()
-            remaining = max(DAILY_LIMIT - used, 0)
-            st.success(f"✅ 已启用免费演示额度（每日 {DAILY_LIMIT} 次提问）")
-            st.caption(
-                f"今日剩余 **{remaining}/{DAILY_LIMIT}** 次。"
-                "额度用完后，可在下方填入自己的 API Key 不限次体验。"
-            )
-
-        # 访客自带 key（可选）：填入后绕过演示额度限制，费用走访客自己的账户
-        with st.expander(
-            "🔧 用自己的 API Key（可选，不限次数）",
-            expanded=not demo_ready,  # 没有演示额度时默认展开，引导填写
-        ):
-            api_key_input = st.text_input(
-                "Anthropic API Key",
-                type="password",
-                help="从 https://console.anthropic.com/ 获取（用于生成回答）",
-            )
-            voyage_key_input = st.text_input(
-                "Voyage API Key",
-                type="password",
-                help="从 https://www.voyageai.com/ 获取（用于文本向量化/检索）",
-            )
-            if api_key_input and voyage_key_input:
-                os.environ["ANTHROPIC_API_KEY"] = api_key_input
-                os.environ["VOYAGE_API_KEY"] = voyage_key_input
-                st.session_state.byo_key = True
-                st.success("已切换为你自己的 API Key，不受演示额度限制。")
-            elif api_key_input or voyage_key_input:
-                st.warning("两个 Key 都需要填写才能生效。")
-
         st.markdown("---")
 
         # ── 1. 文件上传区域 ──────────────────────────────
@@ -402,18 +360,14 @@ def _handle_user_input(question: str, model, reranker):
         model:    SentenceTransformer 模型实例
         reranker: cross-encoder 重排模型（None 则跳过精排）
     """
-    # ── 演示限流：用作者自带 key 时，全站每日总提问数有上限 ──────────
-    # 访客填了自己的 key（byo_key=True）则不受限，费用走他自己账户。
-    if not st.session_state.get("byo_key", False):
-        allowed, _ = check_and_increment(DAILY_LIMIT)
-        if not allowed:
-            with st.chat_message("assistant"):
-                st.warning(
-                    f"😅 今日免费演示额度（{DAILY_LIMIT} 次）已用完。\n\n"
-                    "请明天再来，或在左侧 **🔧 用自己的 API Key** 填入你的 "
-                    "Anthropic + Voyage Key，即可不限次数继续体验。"
-                )
-            return
+    # ── 演示限流：全站每日总提问数有上限，保护作者的 API key 不被滥用 ──
+    allowed, _ = check_and_increment(DAILY_LIMIT)
+    if not allowed:
+        with st.chat_message("assistant"):
+            st.warning(
+                f"😅 今日免费演示额度（{DAILY_LIMIT} 次）已用完，请明天再来体验~"
+            )
+        return
 
     # 立即显示用户消息
     with st.chat_message("user"):
