@@ -6,7 +6,9 @@
 
 ### 🚀 最新版本已实测上线，欢迎点击下方链接使用
 
-**👉 [analystcopilot-turbo.streamlit.app](https://analystcopilot-turbo.streamlit.app/)** 
+**👉 [analystcopilot-turbo.streamlit.app](https://analystcopilot-turbo.streamlit.app/)** — 无需安装，打开即用，上传你自己的 PDF 研报试试。
+
+> 部署在 Streamlit Community Cloud，已配置保活监控，通常即开即用。演示额度由作者提供（每日全站 50 次提问），请文明使用 🙏。
 
 ---
 
