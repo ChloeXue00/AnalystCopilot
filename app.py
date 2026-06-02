@@ -9,6 +9,8 @@ app.py
 """
 
 import os
+import time
+import uuid
 import tempfile
 import streamlit as st
 from pathlib import Path
@@ -43,7 +45,7 @@ RERANK_MODEL: str = "rerank-2"                  # Voyage 重排模型
 EMBEDDING_MODEL: str = "voyage-3"               # Voyage 嵌入模型（金融可换 voyage-finance-2）
 CLAUDE_MODEL: str = "claude-sonnet-4-20250514"                   # Claude 模型 ID
 MAX_TOKENS: int = 2048         # Claude 生成回答的最大 token 数
-CHROMA_COLLECTION: str = "rag_docs"  # 向量库集合名称
+COLLECTION_PREFIX: str = "rag"  # 会话级向量库集合名前缀（每个访客一个独立集合）
 
 DAILY_LIMIT: int = 50          # 【演示限流】用作者自带 key 时，全站每日总提问上限。
                                # 访客在侧边栏填入自己的 key 后不受此限。跨天自动归零。
@@ -115,6 +117,36 @@ def get_reranker():
 # Session State 初始化（保持对话状态跨 rerun 存活）
 # ============================================================
 
+def _cleanup_stale_stores(max_age_hours: int = 6):
+    """
+    删除超过 max_age_hours 的会话向量库文件。
+    公开 demo 长期运行时，每个访客会话都会留下一个 pickle，需定期清理防止磁盘堆积。
+    （Streamlit Cloud 容器重启也会整体清空，这里只是额外保险。）
+    """
+    store_dir = "./vector_store"
+    if not os.path.isdir(store_dir):
+        return
+    cutoff = time.time() - max_age_hours * 3600
+    for name in os.listdir(store_dir):
+        path = os.path.join(store_dir, name)
+        try:
+            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except Exception:
+            pass
+
+
+def get_collection_name() -> str:
+    """
+    为每个浏览器会话分配独立的向量库集合名，避免不同访客上传的文件相互可见。
+    集合名存在 session_state，跨 rerun 稳定；新会话首次创建时顺手清理过期文件。
+    """
+    if "collection_name" not in st.session_state:
+        _cleanup_stale_stores()
+        st.session_state.collection_name = f"{COLLECTION_PREFIX}_{uuid.uuid4().hex[:12]}"
+    return st.session_state.collection_name
+
+
 def init_session_state():
     """
     初始化 Streamlit session state 中的关键变量。
@@ -129,8 +161,8 @@ def init_session_state():
         st.session_state.display_messages = []
 
     if "uploaded_files_set" not in st.session_state:
-        # 已上传文件名集合（用于避免重复上传）
-        st.session_state.uploaded_files_set = set(get_all_sources(CHROMA_COLLECTION))
+        # 已上传文件名集合（用于避免重复上传）。新会话的独立集合，初始必为空。
+        st.session_state.uploaded_files_set = set(get_all_sources(get_collection_name()))
 
 
 # ============================================================
@@ -217,7 +249,7 @@ def render_sidebar(model):
 
         # ── 2. 已上传文件列表 ────────────────────────────
         st.subheader("📚 知识库文件")
-        chunk_counts = get_chunk_count_per_source(CHROMA_COLLECTION)
+        chunk_counts = get_chunk_count_per_source(get_collection_name())
 
         if not chunk_counts:
             st.caption("知识库为空，请先上传 PDF 文件。")
@@ -285,7 +317,7 @@ def _process_uploaded_files(new_files, model):
                 chunk["source"] = uploaded_file.name
 
             # 向量化并写入数据库
-            count = add_chunks_to_db(chunks, model, collection_name=CHROMA_COLLECTION)
+            count = add_chunks_to_db(chunks, model, collection_name=get_collection_name())
 
             st.session_state.uploaded_files_set.add(uploaded_file.name)
             st.sidebar.success(f"✅ {uploaded_file.name}（{count} 段）")
@@ -307,7 +339,7 @@ def _delete_file(source_name: str):
     Args:
         source_name: 要删除的文件名
     """
-    remaining = delete_source_from_db(source_name, collection_name=CHROMA_COLLECTION)
+    remaining = delete_source_from_db(source_name, collection_name=get_collection_name())
     st.session_state.uploaded_files_set.discard(source_name)
     st.toast(f"已删除《{source_name}》，库中剩余 {remaining} 条记录。")
 
@@ -331,7 +363,7 @@ def render_chat_area(model, reranker):
     st.title("💬 行研问答")
 
     # 检查知识库是否有内容
-    sources = get_all_sources(CHROMA_COLLECTION)
+    sources = get_all_sources(get_collection_name())
     if not sources:
         st.info("👈 请先在左侧上传 PDF 研究报告，然后开始提问。")
     else:
@@ -407,7 +439,7 @@ def _handle_user_input(question: str, model, reranker):
             query=search_query,
             model=model,
             top_k=RETRIEVE_K,
-            collection_name=CHROMA_COLLECTION,
+            collection_name=get_collection_name(),
             max_distance=MAX_DISTANCE,
         )
 
