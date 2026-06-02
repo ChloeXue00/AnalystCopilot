@@ -3,8 +3,9 @@
 # 注意：不要关闭 CORS/XSRF 校验 —— 实测关闭后本地反而连不上 websocket（页面一直加载）。
 
 [server]
-port = 8501
-headless = false             # 启动时自动弹出浏览器
+headless = true              # 云端部署必须为 true：false 会触发"输入邮箱"欢迎提示，
+                             # 阻塞服务器启动导致 Streamlit Cloud 报 "Oh no. Error running app"。
+                             # 本地想自动弹浏览器可临时用：streamlit run app.py --server.headless false
 fileWatcherType = "poll"     # Windows 上文件监视用轮询，更稳
 
 [browser]
