@@ -25,6 +25,7 @@ from utils.embedder import (
     get_chunk_count_per_source,
 )
 from utils.chat import chat_with_claude, format_sources_for_display, rewrite_query
+from utils.rate_limit import check_and_increment, get_count
 
 # ============================================================
 # 全局配置常量（在此修改以调整系统行为）
@@ -42,7 +43,10 @@ RERANK_MODEL: str = "rerank-2"                  # Voyage 重排模型
 EMBEDDING_MODEL: str = "voyage-3"               # Voyage 嵌入模型（金融可换 voyage-finance-2）
 CLAUDE_MODEL: str = "claude-sonnet-4-20250514"                   # Claude 模型 ID
 MAX_TOKENS: int = 2048         # Claude 生成回答的最大 token 数
-CHROMA_COLLECTION: str = "rag_docs"  # ChromaDB 集合名称
+CHROMA_COLLECTION: str = "rag_docs"  # 向量库集合名称
+
+DAILY_LIMIT: int = 50          # 【演示限流】用作者自带 key 时，全站每日总提问上限。
+                               # 访客在侧边栏填入自己的 key 后不受此限。跨天自动归零。
 
 # ============================================================
 # 页面基础配置
@@ -54,6 +58,28 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+# ============================================================
+# API Key 加载（云端部署用作者自己的 key）
+# ============================================================
+
+def load_api_keys_from_secrets():
+    """
+    从 Streamlit secrets 读取 API key 写入环境变量。
+    部署到 Streamlit Cloud 时，在 App → Settings → Secrets 里配置：
+        ANTHROPIC_API_KEY = "sk-ant-..."
+        VOYAGE_API_KEY    = "pa-..."
+    本地无 secrets.toml 时 st.secrets 访问会抛错，已 try/except 忽略，
+    此时回退到「访客自带 key」模式（侧边栏手填）。
+    """
+    try:
+        for key in ("ANTHROPIC_API_KEY", "VOYAGE_API_KEY"):
+            value = st.secrets.get(key)
+            if value and not os.environ.get(key):
+                os.environ[key] = str(value)
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -125,25 +151,46 @@ def render_sidebar(model):
         st.title("📊 行研知识库助手")
         st.markdown("---")
 
-        # ── 0. API Key 输入（支持页面直接填写）────────────
+        # ── 0. API Key 配置 ──────────────────────────────
         st.subheader("🔑 API 配置")
-        api_key_input = st.text_input(
-            "Anthropic API Key",
-            value=os.environ.get("ANTHROPIC_API_KEY", ""),
-            type="password",
-            help="从 https://console.anthropic.com/ 获取（用于生成回答）",
-        )
-        if api_key_input:
-            os.environ["ANTHROPIC_API_KEY"] = api_key_input
 
-        voyage_key_input = st.text_input(
-            "Voyage API Key",
-            value=os.environ.get("VOYAGE_API_KEY", ""),
-            type="password",
-            help="从 https://www.voyageai.com/ 获取（用于文本向量化/检索）",
+        # 是否已由作者的 secrets 提供了可用的演示额度
+        demo_ready = bool(os.environ.get("ANTHROPIC_API_KEY")) and bool(
+            os.environ.get("VOYAGE_API_KEY")
         )
-        if voyage_key_input:
-            os.environ["VOYAGE_API_KEY"] = voyage_key_input
+
+        if demo_ready and not st.session_state.get("byo_key"):
+            used = get_count()
+            remaining = max(DAILY_LIMIT - used, 0)
+            st.success(f"✅ 已启用免费演示额度（每日 {DAILY_LIMIT} 次提问）")
+            st.caption(
+                f"今日剩余 **{remaining}/{DAILY_LIMIT}** 次。"
+                "额度用完后，可在下方填入自己的 API Key 不限次体验。"
+            )
+
+        # 访客自带 key（可选）：填入后绕过演示额度限制，费用走访客自己的账户
+        with st.expander(
+            "🔧 用自己的 API Key（可选，不限次数）",
+            expanded=not demo_ready,  # 没有演示额度时默认展开，引导填写
+        ):
+            api_key_input = st.text_input(
+                "Anthropic API Key",
+                type="password",
+                help="从 https://console.anthropic.com/ 获取（用于生成回答）",
+            )
+            voyage_key_input = st.text_input(
+                "Voyage API Key",
+                type="password",
+                help="从 https://www.voyageai.com/ 获取（用于文本向量化/检索）",
+            )
+            if api_key_input and voyage_key_input:
+                os.environ["ANTHROPIC_API_KEY"] = api_key_input
+                os.environ["VOYAGE_API_KEY"] = voyage_key_input
+                st.session_state.byo_key = True
+                st.success("已切换为你自己的 API Key，不受演示额度限制。")
+            elif api_key_input or voyage_key_input:
+                st.warning("两个 Key 都需要填写才能生效。")
+
         st.markdown("---")
 
         # ── 1. 文件上传区域 ──────────────────────────────
@@ -323,6 +370,19 @@ def _handle_user_input(question: str, model, reranker):
         model:    SentenceTransformer 模型实例
         reranker: cross-encoder 重排模型（None 则跳过精排）
     """
+    # ── 演示限流：用作者自带 key 时，全站每日总提问数有上限 ──────────
+    # 访客填了自己的 key（byo_key=True）则不受限，费用走他自己账户。
+    if not st.session_state.get("byo_key", False):
+        allowed, _ = check_and_increment(DAILY_LIMIT)
+        if not allowed:
+            with st.chat_message("assistant"):
+                st.warning(
+                    f"😅 今日免费演示额度（{DAILY_LIMIT} 次）已用完。\n\n"
+                    "请明天再来，或在左侧 **🔧 用自己的 API Key** 填入你的 "
+                    "Anthropic + Voyage Key，即可不限次数继续体验。"
+                )
+            return
+
     # 立即显示用户消息
     with st.chat_message("user"):
         st.markdown(question)
@@ -407,6 +467,9 @@ def main():
     """
     应用主入口：初始化状态 → 加载模型 → 渲染 UI。
     """
+    # 优先从 Streamlit secrets 载入作者的 key（云端演示额度）
+    load_api_keys_from_secrets()
+
     init_session_state()
 
     # 初始化 embedding / rerank 客户端（轻量对象，真正的 API 调用在用到时才发生，

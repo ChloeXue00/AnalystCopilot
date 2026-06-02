@@ -10,6 +10,9 @@ vector_store/
 chroma_db/
 chroma_db_old_incompatible/
 
+# ── 限流计数（运行时生成）──
+rate_limit.json
+
 # ── 临时/调试文件 ──
 _*.py
 _*.txt
