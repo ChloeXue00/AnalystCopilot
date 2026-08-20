@@ -72,12 +72,14 @@ def build_rag_context(retrieved_chunks: List[Dict]) -> str:
         source = chunk["source"]
         chunk_id = chunk["chunk_id"]
         text = chunk["text"]
+        graph_path = chunk.get("graph_path")
         # 相关度：余弦距离越小越好，转换成百分比展示
         relevance = round((1 - chunk["distance"]) * 100, 1)
+        path_note = f"；图路径：{graph_path}" if graph_path else ""
         context_parts.append(
             f"---\n"
             f"[资料{i}] 来源：《{source}》第{chunk_id + 1}段 "
-            f"（相关度：{relevance}%）\n"
+            f"（相关度：{relevance}%{path_note}）\n"
             f"{text}\n"
         )
 
@@ -238,7 +240,7 @@ def format_sources_for_display(retrieved_chunks: List[Dict]) -> str:
             preview = chunk["text"][:80].replace("\n", " ")
             lines.append(
                 f"{i}. **《{source}》** 第{chunk_id + 1}段 "
-                f"（相关度 {relevance}%）  \n"
+                f"（相关度 {relevance}%{' · 图证据' if chunk.get('retrieval_mode') == 'graph' else ''}）  \n"
                 f"   *预览：{preview}…*"
             )
 

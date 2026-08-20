@@ -37,6 +37,8 @@ Voyage API 向量化（voyage-3，云端调用，本地零模型依赖）      (
    ↓
 用户提问 → [可选] LLM 改写 → 向量检索粗筛 + 距离阈值过滤
    ↓
+[关系/因果问题] 会话级证据图两跳扩展（实体 → 关系 → 原文片段）
+   ↓
 [可选] Voyage rerank API 重排，精选 top-k                     (rerank)
    ↓
 Claude API 基于检索内容生成回答，严格 grounding              (utils/chat.py)
@@ -53,6 +55,7 @@ AnalystCopilot/
 │   ├── pdf_parser.py       # PDF 解析、表格感知切分、表格质量过滤
 │   ├── embedder.py         # Voyage 向量化/重排 + 纯 numpy 向量库
 │   ├── chat.py             # Claude API 调用、严格提示词、query rewriting
+│   ├── knowledge_graph.py   # 轻量证据图、两跳遍历、路径与来源绑定
 │   └── rate_limit.py       # 全站每日提问限流（保护 API key）
 ├── eval_retrieval.py       # 检索质量评估（recall@k / precision@k）
 ├── requirements.txt

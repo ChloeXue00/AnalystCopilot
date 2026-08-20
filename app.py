@@ -28,6 +28,13 @@ from utils.embedder import (
 )
 from utils.chat import chat_with_claude, format_sources_for_display, rewrite_query
 from utils.rate_limit import check_and_increment
+from utils.knowledge_graph import (
+    build_or_update_graph,
+    delete_source_from_graph,
+    merge_evidence,
+    query_graph,
+    should_use_graph,
+)
 
 # ============================================================
 # 全局配置常量（在此修改以调整系统行为）
@@ -276,6 +283,7 @@ def _process_uploaded_files(new_files, model):
 
             # 向量化并写入数据库
             count = add_chunks_to_db(chunks, model, collection_name=get_collection_name())
+            build_or_update_graph(chunks, collection_name=get_collection_name())
 
             st.session_state.uploaded_files_set.add(uploaded_file.name)
             st.sidebar.success(f"✅ {uploaded_file.name}（{count} 段）")
@@ -298,6 +306,7 @@ def _delete_file(source_name: str):
         source_name: 要删除的文件名
     """
     remaining = delete_source_from_db(source_name, collection_name=get_collection_name())
+    delete_source_from_graph(source_name, collection_name=get_collection_name())
     st.session_state.uploaded_files_set.discard(source_name)
     st.toast(f"已删除《{source_name}》，库中剩余 {remaining} 条记录。")
 
@@ -400,13 +409,32 @@ def _handle_user_input(question: str, model, reranker):
         # 第二阶段（精排）：cross-encoder 重排，取 top TOP_K，保 precision
         # reranker 为 None（未启用/加载失败）时，直接退回向量排序的前 TOP_K
         if reranker is not None and candidates:
-            retrieved_chunks = rerank_chunks(search_query, candidates, reranker, top_n=TOP_K)
+            vector_chunks = rerank_chunks(search_query, candidates, reranker, top_n=TOP_K)
         else:
-            retrieved_chunks = candidates[:TOP_K]
+            vector_chunks = candidates[:TOP_K]
+
+        # 关系链/因果类问题才进入证据图，普通查数仍走更快的向量路径。
+        graph_paths = []
+        if should_use_graph(search_query):
+            graph_chunks, graph_paths = query_graph(
+                query=search_query,
+                collection_name=get_collection_name(),
+                vector_candidates=candidates,
+                max_hops=2,
+                top_k=TOP_K,
+            )
+            retrieved_chunks = merge_evidence(vector_chunks, graph_chunks, TOP_K)
+        else:
+            retrieved_chunks = vector_chunks
 
     # 改写生效时给用户一个透明提示（看到 rewriting 真的在工作）
     if search_query != question:
         st.caption(f"🔁 检索查询已改写为：{search_query}")
+    if graph_paths:
+        st.caption("🕸️ 已触发 GraphRAG 两跳证据扩展")
+        with st.expander("查看多跳推理路径", expanded=False):
+            for path in graph_paths:
+                st.markdown(f"- `{path}`")
 
     # ── 调用 Claude API 生成回答 ──────────────────────────
     with st.chat_message("assistant"):
